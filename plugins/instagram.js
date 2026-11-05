@@ -36,11 +36,11 @@ hoverZoomPlugins.push({
         // fetches from the page: requests relayed through the extension background come
         // from a foreign origin, and Instagram's session cookies ("Lax") aren't sent to
         // those, so the api answers with the login page instead of the media.
-        function apiMedia(url, pick) {
+        function apiMedia(url, pick, headers) {
             if (!self.api.has(url)) {
                 if (self.api.size >= cacheLimit) self.api.delete(self.api.keys().next().value);
                 self.api.set(url, fetch(url, {
-                        headers: { 'x-ig-app-id': webAppId }, credentials: 'include'
+                        headers: headers || { 'x-ig-app-id': webAppId }, credentials: 'include'
                     })
                     .then(response => response.text())
                     .then(pick)
@@ -65,7 +65,89 @@ hoverZoomPlugins.push({
         // posts of private accounts are linked with long signed codes whose tail is only the
         // signature (and the post page's meta no longer names the post at all).
         function postMedia(shortcode) {
-            return apiJson(`/api/v1/media/${mediaId(shortcode.slice(0, 11))}/info/?${apiQuery}`, data => data.items ? data.items[0] : null);
+            return apiJson(`/api/v1/media/${mediaId(shortcode.slice(0, 11))}/info/?${apiQuery}`, data => data.items ? data.items[0] : null)
+                .then(item => item || pageMedia(shortcode));
+        }
+
+        // Logged out, the media api answers with the login page. The post's own page still embeds
+        // the post — carousel included, in the same shape as the api's items — as json in its
+        // <script type="application/json"> blocks, but only when the request asks for html: a plain
+        // fetch (Accept: */*) gets a shell without data.
+        function pageMedia(shortcode) {
+            return apiMedia(`/p/${shortcode}/`, html => {
+                const scripts = html.match(/<script type="application\/json"[^>]*>[\s\S]*?<\/script>/g) || [];
+                for (const script of scripts) {
+                    if (script.indexOf(shortcode) === -1 || !/image_versions2|video_versions/.test(script)) continue;
+                    let data;
+                    try { data = JSON.parse(script.slice(script.indexOf('>') + 1, -'</script>'.length)); } catch { continue; }
+                    const item = findPost(data, shortcode);
+                    if (item) return item;
+                }
+                return null;
+            }, { 'Accept': 'text/html,application/xhtml+xml' });
+        }
+
+        // the object describing a post, wherever the page's data nests it. Album items repeat
+        // the album's code, so an album (carousel_media) wins over any single item
+        function findPost(data, shortcode) {
+            let single = null;
+            const walk = (node, depth) => {
+                if (!node || typeof node !== 'object' || depth > 40) return null;
+                if (node.code === shortcode) {
+                    if (node.carousel_media && node.carousel_media.length) return node;
+                    if (!single && (node.image_versions2 || node.video_versions)) single = node;
+                }
+                for (const key in node) {
+                    const found = walk(node[key], depth + 1);
+                    if (found) return found;
+                }
+                return null;
+            };
+            return walk(data, 0) || single;
+        }
+
+        // The carousel slide under the pointer. Carousels only render the slides around the
+        // visible one, so a slide's place in the album is found by its photo's CDN file name,
+        // which the page's <img> and the api's candidates share whatever their size.
+        // A video slide has no file name (blob: source): its neighbours tell its place.
+        function fileKey(url) {
+            const match = String(url || '').match(/\/([^/?#]+\.(?:jpe?g|webp|heic|png|mp4))(?:[?#]|$)/i);
+            return match && match[1];
+        }
+
+        function slideIndex(post, gallery, event) {
+            if (!post || !gallery || gallery.length < 2 || !event) return -1;
+            const keys = gallery.map(srcs => fileKey(srcs[0]));
+            const indexOf = el => {
+                const media = el && el.querySelector && (el.matches(photoSelector + ', video') ? el : el.querySelector(photoSelector + ', video'));
+                const key = media && fileKey(media.currentSrc || media.src || media.poster);
+                return key ? keys.indexOf(key) : -1;
+            };
+            const under = Array.from(post.querySelectorAll(photoSelector + ', video'))
+                .filter(media => pointerOnMedia(media, event, post));
+            for (const media of under) {
+                const index = indexOf(media);
+                if (index >= 0) return index;
+                const slide = media.closest('li');
+                if (!slide) continue;
+                const before = indexOf(slide.previousElementSibling);
+                if (before >= 0 && before + 1 < gallery.length) return before + 1;
+                const after = indexOf(slide.nextElementSibling);
+                if (after > 0) return after - 1;
+            }
+            return -1;
+        }
+
+        // Moves an album's preview to the slide under the pointer (the user may have used the
+        // carousel's own arrows since the album was resolved)
+        function syncSlide(link, event) {
+            const data = link.data();
+            if (!data.hoverZoomInstagramPost || !data.hoverZoomGallerySrc) return;
+            const index = slideIndex(data.hoverZoomInstagramPost, data.hoverZoomGallerySrc, event);
+            if (index < 0 || index === data.hoverZoomGalleryIndex) return;
+            data.hoverZoomGalleryIndex = index;
+            data.hoverZoomSrc = data.hoverZoomGallerySrc[index];
+            data.hoverZoomSrcIndex = 0;
         }
 
         // the stories of a reel: a highlight, or a user the tray/one of their posts names.
@@ -150,24 +232,36 @@ hoverZoomPlugins.push({
             const post = hit.closest('a[href*="/p/"], a[href*="/reel/"], article');
             if (post) pauseBehindPreview(post.querySelector('video'), post);
 
-            if (hit.closest('.hoverZoomLink')) return;   // already zoomable
+            const zoomable = hit.closest('.hoverZoomLink');
+            if (zoomable) return syncSlide($(zoomable), event);   // already zoomable
 
             const highlight = hit.closest('a[href*="/stories/highlights/"]');
             if (highlight) return showHighlight(highlight);
             const reel = profileReelLink(hit, event);
-            if (reel) return showPostMedia(hit, reel);
+            if (reel) return showPostMedia(hit, reel, event);
             const avatar = profileAvatar(event);
             if (avatar) return showStories(avatar.closest('[role="button"]') || avatar.closest('[role="link"]') || avatar, avatar, profileUsername());
             const circle = hit.closest('[role="button"], [role="link"]');
             const face = circle && circle.querySelector('img[src*="-19/"], img[src*="profile_pic"]');
             if (face) showStories(circle, face);
-            else showPostMedia(hit);
+            else showPostMedia(hit, null, event);
         }
 
         // whether the pointer sits inside an element's box
         function pointerIn(rect, event) {
             return event.clientX >= rect.left && event.clientX <= rect.right &&
                 event.clientY >= rect.top && event.clientY <= rect.bottom;
+        }
+
+        // whether the pointer is on a media element as actually displayed: carousels keep the
+        // slides around the visible one rendered next to it, clipped by an overflow container
+        function pointerOnMedia(media, event, root) {
+            if (!event || !pointerIn(media.getBoundingClientRect(), event)) return false;
+            for (let el = media.parentElement; el && el !== root && el !== document.body; el = el.parentElement) {
+                const style = getComputedStyle(el);
+                if ((style.overflowX !== 'visible' || style.overflowY !== 'visible') && !pointerIn(el.getBoundingClientRect(), event)) return false;
+            }
+            return true;
         }
 
         // the profile picture of the profile being viewed: other pictures can name the
@@ -230,11 +324,19 @@ hoverZoomPlugins.push({
         // advance — the post under the pointer is resolved on hover instead. Its media is
         // the photo or video it holds; profile pictures (Instagram's -19 CDN variant) are
         // not post media.
-        function showPostMedia(hit, forcedPostLink) {
+        function showPostMedia(hit, forcedPostLink, event) {
             // a post is the feed's <article>, or a grid tile's link. The nearest one wins:
             // the saved collection grid wraps all of its tiles in a single <article>, and
             // taking that would resolve every tile to the first post of the grid.
-            const post = forcedPostLink || hit.closest('a[href*="/p/"], a[href*="/reel/"], article');
+            // A post's own page (logged out at least) has no <article>: its media sit straight in
+            // <main>, next to the linked tiles of "more posts" (which match their own link first).
+            let post = forcedPostLink || hit.closest('a[href*="/p/"], a[href*="/reel/"], article');
+            if (!post && shortcodeRe.test(location.pathname)) {
+                const main = hit.closest('main');
+                const onMedia = main && Array.from(main.querySelectorAll(photoSelector + ', video')).some(media =>
+                    !media.closest('a[href*="/p/"], a[href*="/reel/"]') && pointerOnMedia(media, event, main));
+                if (onMedia) post = main;
+            }
             if (!post || self.resolved.has(post)) return;
             // a grid tile can hold its media as a plain image or as a background
             const media = post.querySelector(photoSelector + ', video') ||
@@ -255,7 +357,22 @@ hoverZoomPlugins.push({
                     self.resolved.delete(post);
                     return;
                 }
-                hoverZoom.prepareLink($(frame), srcs);
+                const link = $(frame);
+                if (Array.isArray(srcs) && srcs.length > 1) {
+                    // an album opens at the slide being looked at, not always at the first one.
+                    // prepareLink starts at 0 and displays right away, so set the gallery up first
+                    const data = link.data();
+                    const index = Math.max(0, slideIndex(post, srcs, event));
+                    data.hoverZoomInstagramPost = post;
+                    data.hoverZoomGallerySrc = srcs;
+                    data.hoverZoomGalleryIndex = index;
+                    data.hoverZoomSrc = srcs[index];
+                    data.hoverZoomSrcIndex = 0;
+                    link.addClass('hoverZoomLink hoverZoomLinkFromPlugIn');
+                    hoverZoom.displayPicFromElement(link);
+                } else {
+                    hoverZoom.prepareLink(link, srcs);
+                }
             };
             const fallback = () => {                      // the page's own full size photo
                 const cover = post.querySelector(photoSelector);
@@ -264,7 +381,8 @@ hoverZoomPlugins.push({
             };
             const show = srcs => srcs ? zoom(srcs) : fallback();
 
-            const link = forcedPostLink || (post.matches('a[href]') ? post : post.querySelector('a[href*="/p/"], a[href*="/reel/"]'));
+            const link = forcedPostLink || (post.matches('a[href]') ? post :
+                post.matches('main') ? null : post.querySelector('a[href*="/p/"], a[href*="/reel/"]'));
             // on a post's own page there is often no link: the url carries the shortcode
             const shortcode = (link && (link.getAttribute('href').match(shortcodeRe) || [])[1]) ||
                 (location.pathname.match(shortcodeRe) || [])[1];
