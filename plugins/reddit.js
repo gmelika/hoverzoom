@@ -174,17 +174,37 @@ hoverZoomPlugins.push({
       return '/comments/' + id.replace(/^t3_/, '') + '/.json?raw_json=1';
     }
 
+    // full-size candidates for one gallery item; animated items (GIFs) only have gif/mp4 renditions
+    // (.video tells the core to play an extension-less mp4 url as video)
+    function galleryItemSrcs(id, meta) {
+      var s = meta.s || {};
+      var srcs = [];
+      if (meta.e === 'AnimatedImage') {
+        if (s.gif) srcs.push(s.gif);
+        if (s.mp4) srcs.push(s.mp4 + '.video');
+      } else {
+        if (meta.m) srcs.push('https://i.redd.it/' + id + '.' + meta.m.replace(/^image\//, '').replace('jpeg', 'jpg'));
+        if (s.u) srcs.push(s.u);
+      }
+      return srcs;
+    }
+
     function processGalleryResponse(post, data) {
       // /comments/ returns [postListing, commentsListing]
       if (Array.isArray(data)) data = data[0];
-      if (data && data.data) {
-        var gallery_data = data.data.children[0].data.gallery_data;
-        var media_metadata = data.data.children[0].data.media_metadata;
+      if (data && data.data && data.data.children && data.data.children.length) {
+        var postData = data.data.children[0].data;
+        // a crosspost carries no media itself: the gallery lives on the original post
+        if (!postData.gallery_data && postData.crosspost_parent_list && postData.crosspost_parent_list.length)
+          postData = postData.crosspost_parent_list[0];
+        var gallery_data = postData.gallery_data;
+        var media_metadata = postData.media_metadata;
         if (gallery_data != null && media_metadata != null) {
-          var items = gallery_data.items;
-          var src = items
-            .filter(item => media_metadata[item.media_id].status === 'valid')
-            .map(item => ['https://i.redd.it/' + item.media_id + '.' + media_metadata[item.media_id].m.substring(6)]);
+          var src = gallery_data.items
+            .filter(item => media_metadata[item.media_id] && media_metadata[item.media_id].status === 'valid')
+            .map(item => galleryItemSrcs(item.media_id, media_metadata[item.media_id]))
+            .filter(srcs => srcs.length);
+          if (src.length === 0) return;
           var img = post.find('a.title');
           if (img.length === 0)
             img = post.find('a.thumbnail');
