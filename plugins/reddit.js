@@ -183,8 +183,11 @@ hoverZoomPlugins.push({
         if (s.gif) srcs.push(s.gif);
         if (s.mp4) srcs.push(s.mp4 + '.video');
       } else {
-        if (meta.m) srcs.push('https://i.redd.it/' + id + '.' + meta.m.replace(/^image\//, '').replace('jpeg', 'jpg'));
+        // s.u = signed full-resolution preview.redd.it url, what the gallery page itself shows. It must come
+        // first: for some posts i.redd.it answers the hand-built url with a 200 "deleted" placeholder image,
+        // which loads fine and so never falls through to the next candidate.
         if (s.u) srcs.push(s.u);
+        if (meta.m) srcs.push('https://i.redd.it/' + id + '.' + meta.m.replace(/^image\//, '').replace('jpeg', 'jpg'));
       }
       return srcs;
     }
