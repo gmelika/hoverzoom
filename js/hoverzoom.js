@@ -524,6 +524,14 @@ var hoverZoom = {
                 return;
             } else {
 
+                // gallery image->image swaps reuse the <img> and only change its src (no loader): until the new
+                // image has loaded, naturalWidth/Height still describe the previous image (or are 0). Sizing now
+                // would cache wrong dimensions for the new source, and clearing `loading` would make
+                // nextGalleryImageOnLoad skip the refit, leaving the new image at its natural size.
+                if (imgFullSize[0].tagName === 'IMG' && !imgFullSize[0].complete) {
+                    return;
+                }
+
                 // img fully loaded
                 loading = false;
                 imgFullSize.css({'background-image':''}); // remove background image displayed during loading
