@@ -1111,6 +1111,7 @@ var hoverZoom = {
         var lastMousePosTop = -1, lastMousePosLeft = -1, cursorHideTimeout = 0;
 
         function documentMouseMove(event) {
+            if (retireIfOrphaned()) return;
             if (!options.extensionEnabled || fullZoomKeyDown || isExcludedSite() || wnd.height() < 30 || wnd.width() < 30) {
                 return;
             }
@@ -1415,6 +1416,7 @@ var hoverZoom = {
         }
 
         function documentMouseDown(event) {
+            if (retireIfOrphaned()) return;
             // if image is locked and left click is pressed outside of locked image
             if (event.button === 0 && imgFullSize && event.target !== hz.hzViewer[0] && event.target !== imgFullSize[0]) {
                 if (viewerLocked) {
@@ -2710,6 +2712,7 @@ var hoverZoom = {
         }
 
         function prepareImgLinks() {
+            if (retireIfOrphaned()) return;
             cTime('prepareImgLinks');
             pageActionShown = false;
 
@@ -2946,6 +2949,7 @@ var hoverZoom = {
         }
 
         function windowOnDOMMutation(mutations, observer) {
+            if (retireIfOrphaned()) return;
             for (const mutation of mutations) {
                 if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                     for (const insertedNode of mutation.addedNodes) {
@@ -2977,6 +2981,35 @@ var hoverZoom = {
             prepareImgLinksAsync();
         }
 
+        // When the extension is reloaded or updated, pages that stay open keep running this (now dead)
+        // instance: its extension context is invalidated and every chrome.runtime call throws, so previews
+        // silently stop until the page is reloaded. The background injects the new instance into open tabs
+        // (injectIntoOpenTabs); the dead one detaches itself on its next event so it can't swallow events or
+        // leave a stale viewer next to the new one.
+        let retired = false;
+        function retireIfOrphaned() {
+            if (retired) return true;
+            try {
+                if (chrome.runtime && chrome.runtime.id) return false;
+            } catch (e) {}
+            retired = true;
+            clearTimeout(loadFullSizeImageTimeout);
+            clearTimeout(prepareImgLinksTimeout);
+            observer.disconnect();
+            if (htmlObserver) htmlObserver.disconnect();
+            $(document).off();
+            wnd.off();
+            $('[jsaction]').off('mousemove', documentMouseMove).off('keyup', documentOnKeyUp);
+            window.removeEventListener('wheel', documentOnMouseWheel, {passive: false});
+            document.removeEventListener('auxclick', middleMouseClickEvent);
+            try { stopMedias(); } catch (e) {}
+            if (hz.hzViewer) { hz.hzViewer.remove(); hz.hzViewer = null; }
+            if (hz.hzLoader) { hz.hzLoader.remove(); hz.hzLoader = null; }
+            imgFullSize = null;
+            return true;
+        }
+
+        var htmlObserver = null;
         var lastScrollTop = 0;
         var deltaMin = 1000;
         function bindEvents() {
@@ -3029,6 +3062,7 @@ var hoverZoom = {
         }
 
         function documentOnMouseWheel(event) {
+            if (retireIfOrphaned()) return;
             if (!imgFullSize) { return; }
 
             var now = Date.now();
@@ -3105,6 +3139,7 @@ var hoverZoom = {
         }
 
         function documentOnKeyDown(event) {
+            if (retireIfOrphaned()) return;
             // Skips if an input controlled is focused
             if (event.target && ['INPUT','TEXTAREA','SELECT'].indexOf(event.target.tagName) > -1) {
                 return;
@@ -3274,6 +3309,7 @@ var hoverZoom = {
         }
 
         function documentOnKeyUp(event) {
+            if (retireIfOrphaned()) return;
             // Skips if an input controlled is focused
             if (event.target && ['INPUT','TEXTAREA','SELECT'].indexOf(event.target.tagName) > -1) {
                 return;
@@ -4342,6 +4378,7 @@ var hoverZoom = {
             preloadImg.src = hz.currentLink.data().hoverZoomGallerySrc[index][0];
         }
 
+        let staleMarksCleared = false;
         function init() {
             if (!window.innerHeight || !window.innerWidth || !options.extensionEnabled || isExcludedSite()) {
                 return;
@@ -4356,6 +4393,13 @@ var hoverZoom = {
             webSiteExcluded = null;
             body100pct = (body.css('position') != 'static') || (body.css('padding-left') == '0px' && body.css('padding-right') == '0px' && body.css('margin-left') == '0px' && body.css('margin-right') == '0px' && (body.css('max-width') == 'none' || body.css('max-width') == '100%'));
             hz.pageGenerator = $('meta[name="generator"]').attr('content');
+            if (!staleMarksCleared) {
+                // marks left by a dead previous instance (see retireIfOrphaned) carry no data for this one,
+                // and the outermost .hoverZoomLink wins: they would shadow this instance's own targets
+                staleMarksCleared = true;
+                $('.hoverZoomLink').removeClass('hoverZoomLink hoverZoomLinkFromPlugIn');
+                $('#hzViewer, #hzLoader').remove();
+            }
             prepareImgLinks();
             bindEvents();
 
@@ -4368,7 +4412,7 @@ var hoverZoom = {
 
         // In case we are being used on a website that removes us from the DOM, update the internal data structure to reflect this
         var target = document.getElementsByTagName('html')[0];
-        var obs = new MutationObserver(function(mutations) {
+        var obs = htmlObserver = new MutationObserver(function(mutations) {
             mutations.forEach(function(mutation) {
                 if (mutation.removedNodes.length > 0) {
                     if (mutation.removedNodes[0].querySelector('#hzViewer')) {

@@ -376,3 +376,52 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 const keepAlive = () => setInterval(chrome.runtime.getPlatformInfo, 20e3);
 chrome.runtime.onStartup.addListener(keepAlive);
 keepAlive();
+
+// When the extension is installed, reloaded or updated, tabs that are already open keep the previous
+// instance's content scripts, whose extension context is now invalidated: every preview silently stops
+// until the page is reloaded. Inject the current content scripts into those tabs (top frame); the dead
+// instance detaches itself (retireIfOrphaned in hoverzoom.js).
+function matchPatternToRegExp(pattern) {
+    const esc = s => s.replace(/[.+?^${}()|[\]\\\/]/g, '\\$&');
+    if (pattern === '<all_urls>') return /^(?:https?|file|ftp):\/\//;
+    const m = pattern.match(/^(\*|https?|file|ftp):\/\/(\*|\*\.[^\/*]+|[^\/*]*)(\/.*)$/);
+    if (!m) return null;
+    const scheme = m[1] === '*' ? 'https?' : m[1];
+    const host = m[2] === '*' ? '[^/]+'
+        : m[2].startsWith('*.') ? '(?:[^/]+\\.)?' + esc(m[2].slice(2))
+        : esc(m[2]);
+    const path = m[3].split('*').map(esc).join('.*');
+    return new RegExp('^' + scheme + ':\\/\\/' + host + '(?::\\d+)?' + path + '$');
+}
+
+async function injectIntoOpenTabs() {
+    const entries = (chrome.runtime.getManifest().content_scripts || []).map(e => ({
+        js: e.js || [],
+        css: e.css || [],
+        matches: (e.matches || []).map(matchPatternToRegExp).filter(Boolean),
+        excludes: (e.exclude_matches || []).map(matchPatternToRegExp).filter(Boolean)
+    }));
+    const tabs = await chrome.tabs.query({url: ['http://*/*', 'https://*/*']});
+    for (const tab of tabs) {
+        if (tab.discarded || !tab.url) continue;
+        const url = tab.url.split('#')[0];
+        const js = [], css = [];
+        for (const e of entries) {
+            if (e.matches.some(r => r.test(url)) && !e.excludes.some(r => r.test(url))) {
+                e.js.forEach(f => js.includes(f) || js.push(f));
+                e.css.forEach(f => css.includes(f) || css.push(f));
+            }
+        }
+        if (!js.length) continue;
+        try {
+            if (css.length) await chrome.scripting.insertCSS({target: {tabId: tab.id}, files: css});
+            await chrome.scripting.executeScript({target: {tabId: tab.id}, files: js});
+        } catch (e) {
+            // pages extensions can't script (web store, error pages, ...)
+        }
+    }
+}
+
+chrome.runtime.onInstalled.addListener(details => {
+    if (details.reason === 'install' || details.reason === 'update') injectIntoOpenTabs();
+});

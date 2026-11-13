@@ -273,6 +273,16 @@ var hzVisitedLinks = (function () {
     // ---- lifecycle ----
 
     function onMutations(mutations) {
+        if (!chrome.runtime || !chrome.runtime.id) {
+            // extension reloaded/updated: this instance is dead and a new one takes over (see retireIfOrphaned
+            // in hoverzoom.js); drop our observer and style, keep the marks for the new instance to reuse
+            if (observer) observer.disconnect();
+            observer = null;
+            enabled = false;
+            if (styleEl) styleEl.remove();
+            styleEl = null;
+            return;
+        }
         for (const m of mutations) {
             if (m.type === 'attributes') {
                 if (m.target.nodeType === 1 && m.target.matches('a[href], area[href]')) {
