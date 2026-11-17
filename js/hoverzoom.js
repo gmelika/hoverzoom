@@ -2684,9 +2684,16 @@ var hoverZoom = {
             // Commented this out in version 2.9 for better performances. Keep an eye on it for potential side effects.
             //$('.hoverZoomLink').removeClass('hoverZoomLink').removeData('hoverZoomSrc');
 
+            // One plugin throwing must not abort the scan: every later plugin (incl. the generic one) would
+            // stop tagging, and since each scan sees the whole page, previews die for the rest of its life.
             for (var i = 0; i < hoverZoomPlugins.length; i++) {
-                if (!options.disabledPlugins.includes(hoverZoomPlugins[i].name.replace(/[^\w\-_]/g, '').toLowerCase()))
-                    hoverZoomPlugins[i].prepareImgLinks(imgLinksPrepared);
+                if (!options.disabledPlugins.includes(hoverZoomPlugins[i].name.replace(/[^\w\-_]/g, '').toLowerCase())) {
+                    try {
+                        hoverZoomPlugins[i].prepareImgLinks(imgLinksPrepared);
+                    } catch (e) {
+                        console.warn('Hover Zoom+: plugin ' + hoverZoomPlugins[i].name + ' failed', e);
+                    }
+                }
             }
             prepareImgLinksTimeout = null;
 
@@ -3071,9 +3078,16 @@ var hoverZoom = {
             }
         }
 
+        // Shortcut keys are bare letters (toggle = E, ban = B...): ignore them while the user types, including
+        // in rich-text editors (x.com/Facebook/Discord composers are contenteditable divs, not textareas) —
+        // otherwise typing a reply silently toggles the extension off for the tab.
+        function isTypingTarget(target) {
+            return !!target && (['INPUT','TEXTAREA','SELECT'].indexOf(target.tagName) > -1 || target.isContentEditable);
+        }
+
         function documentOnKeyDown(event) {
             // Skips if an input controlled is focused
-            if (event.target && ['INPUT','TEXTAREA','SELECT'].indexOf(event.target.tagName) > -1) {
+            if (isTypingTarget(event.target)) {
                 return;
             }
 
@@ -3242,7 +3256,7 @@ var hoverZoom = {
 
         function documentOnKeyUp(event) {
             // Skips if an input controlled is focused
-            if (event.target && ['INPUT','TEXTAREA','SELECT'].indexOf(event.target.tagName) > -1) {
+            if (isTypingTarget(event.target)) {
                 return;
             }
 
